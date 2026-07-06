@@ -6,9 +6,15 @@
 
 | 文件 | 作用 | 状态 |
 |---|---|---|
-| `reward.py` | 报告 §6 的 reward:itemic命中(R_rule) × 多样性(R_div)。含 TRL-GRPOTrainer 兼容的 `make_grpo_reward_func`，以及 RFT/DPO 用的 `group_reward`/`itemic_hit` | ✅ CPU自测通过 |
-| `build_rl_prompts.py` | 从官方懂推荐数据抽 (prompt, gold_items) 作为 RL prompt 集 | ✅ 已验证 |
-| `rollout.py` | 采样候选 + reward 打分;`--dump-hits` 直接产出 RFT 数据 | ⏳ 需GPU，reward逻辑已CPU测 |
+| `reward.py` | itemic命中(exact) + **分级部分奖励(graded 0.3/0.6/1.0)** × 多样性(R_div)。TRL-GRPO 兼容 `make_grpo_reward_func(accuracy=...)` | ✅ CPU自测通过 |
+| `build_rl_prompts.py` | 从官方懂推荐抽 (prompt, gold_items) 集 | ✅ 已验证 |
+| `rollout.py` | 采样 + 分域统计(exact命中率 vs 分级信号密度);`--dump-hits` 产出RFT数据 | ✅ 已跑探测 |
+| `train_grpo.py` | GRPO 训练入口(TRL GRPOTrainer + LoRA + 分级reward)。两个稳定器标了TODO | ⏳ 框架就绪，等A100 |
+
+## 🔑 探测结论（2026-07-06，见 ../RL_DESIGN.md §0.5）
+- exact命中率 **0.8%**（太稀疏）→ **RFT 放弃**
+- 分级部分奖励把信号密度拉到 **31%**（约40倍）→ **GRPO + 分级奖励 可行，是主攻路径**
+- `train_grpo.py` 默认 `accuracy="graded"`；跑前需 `pip install mergekit`（修TRL导入）
 
 ## ⚠️ 核心前提(务必先读 RL_DESIGN.md §0)
 

@@ -36,7 +36,27 @@
 
 ---
 
-## 方案 A：RFT（Rejection Sampling Fine-tuning）—— 最易，先做这个
+## 0.5 探测结果（2026-07-06，用 exp4 策略在官方懂推荐 prompt 上 rollout）
+
+跑 `rl/rollout.py`（400 prompt，N=32）实测命中/信号密度：
+
+| 域 | n | exact命中率 | **分级信号密度** | avgGraded |
+|---|---|---|---|---|
+| ad | 42 | 2.4% | 28.6% | 0.117 |
+| living | 20 | 0.0% | 10.0% | 0.030 |
+| prod | 14 | 0.0% | 14.3% | 0.043 |
+| video | 324 | 0.6% | 33.3% | 0.115 |
+| **全部** | 400 | **0.8%** | **31.0%** | 0.109 |
+
+**两个决定性结论：**
+1. **exact 命中率仅 0.8%**（与报告 SFT 模型 Video Pass@64≈1% 同量级）→ **RFT 不可行**：挖不到足够成功轨迹（每~6400次生成才1条）。
+2. **分级部分奖励把信号密度从 0.8% 拉到 31%（约40倍）** → **GRPO 变得可行**。模型很难精确生成对物品，但**经常能生成对品类（s_a）**，分级奖励把这个"方向对了"的信号利用起来，天然形成"先对品类、再refine"的课程。
+
+**→ 路线修正：跳过 RFT，直接 GRPO + 分级奖励。** ⚠️ 分级信号主要是品类(s_a)命中，能否转成真实 item 级 Recall@K 提升，仍需 GRPO 训完正式评测确认（proxy 老问题）。
+
+---
+
+## 方案 A：RFT（Rejection Sampling Fine-tuning）—— ❌ 已降级：exact命中太稀疏，不可行
 
 **核心思想**：不搞在线RL循环。用当前模型对每个prompt采样多个候选 → **只保留命中ground-truth的那些"成功轨迹"** → 把这些成功轨迹当新SFT数据再训一遍。本质是"自己给自己造高质量数据"。
 
@@ -118,24 +138,30 @@
 
 ## 推荐路线图（按投入产出排序）
 
-| 阶段 | 方案 | 硬件 | 何时做 |
+| 阶段 | 方案 | 硬件 | 状态 |
 |---|---|---|---|
-| RL-0 | 搭共享基础设施（reward函数 + rollout采样 + prompt集） | 当前卡 | 立即，纯代码 |
-| RL-1 | **RFT**（采样+过滤+SFT，最易，验证pipeline+reward） | 当前24GB | A100前就能起步 |
-| RL-2 | **GRPO**（报告主方法，diversity奖励+两稳定器） | **A100** | A100到位后的主攻 |
-| RL-3 | DPO（若GRPO工程受阻的替代/补充） | 当前卡 | 备选 |
-| RL-4 | MOPD多teacher蒸馏 | A100多卡 | 复赛后期，暂不做 |
+| RL-0 | 共享基础设施（reward + rollout + prompt集） | 当前卡 | ✅ 已完成，探测证实分级奖励可行 |
+| ~~RL-1~~ | ~~RFT~~ | — | ❌ 放弃：exact命中0.8%，挖不到数据 |
+| **RL-2** | **GRPO + 分级奖励**（报告主方法，diversity+两稳定器） | **A100** | 🎯 主攻。reward已就绪(`accuracy="graded"`)；训练脚本 `rl/train_grpo.py` 框架已搭 |
+| RL-3 | DPO（GRPO工程受阻的替代） | 当前卡 | 备选 |
+| RL-4 | MOPD多teacher蒸馏 | A100多卡 | 复赛后期 |
 
 **关键先决问题（开工前要定）**：
-1. RL 用 thinking 还是 non-thinking 起点？→ 建议先准备一个 thinking-capable 的 SFT checkpoint（保留CoT训练）当 RL 起点，因为报告的 RL 收益在 thinking 模式。
-2. Prompt 用官方19k还是从50万UserProfile现造？→ 建议混用：官方保证格式/质量，UserProfile扩量并贴近真实分布。
-3. reward 是 proxy（itemic字符串匹配），训完必须用正式评测确认，别只信本地 reward 曲线（同 SFT 阶段 proxy 的教训）。
+1. RL 用 thinking 还是 non-thinking 起点？→ 建议先准备 thinking-capable SFT checkpoint 当起点（报告 RL 收益在 thinking 模式）。探测用的 exp4 是 non-thinking，若走 thinking 起点需另训。
+2. Prompt 用官方19k还是从50万UserProfile现造？→ 混用：官方保format/质量，UserProfile扩量贴近真实分布。
+3. reward 是 proxy（分级信号主要是品类s_a命中），训完必须正式评测确认。
 
 ---
 
-## 立即可做（不占卡，纯代码准备）
-- [ ] 写 reward 函数（itemic token 命中判断 + diversity 计算），复用 `eval_split_loss_recall.py` 里已有的 itemic 提取逻辑
-- [ ] 写 rollout 采样脚本（两阶段：N条CoT × K个itemic），复用现有采样代码
-- [ ] 准备 RL prompt 集（官方懂推荐 + 从 UserProfile 现造）
+## 已完成（RL-0，✅）
+- [x] `rl/reward.py`：itemic命中(exact) + **分级部分奖励(graded, 0.3/0.6/1.0)** + diversity + TRL接口。CPU自测通过。
+- [x] `rl/rollout.py`：采样 + 分域统计(exact命中率 vs 分级信号密度)。探测证实分级奖励把信号从0.8%→31%。
+- [x] `rl/build_rl_prompts.py`：从官方懂推荐构造 (prompt, gold) 集。
+- [x] `rl/train_grpo.py`：GRPO 训练脚本框架（TRL GRPOTrainer + LoRA + 分级reward），等A100直接跑。
+
+## 待做（RL-2，等A100）
+- [ ] 在 `train_grpo.py` 里实现 stage-wise clipping（itemic紧clip防塌缩）+ 负样本降权（需子类化 GRPOTrainer）
+- [ ] 决定 thinking/non-thinking 起点，跑 GRPO，div_sa 护栏 + 正式评测确认
+- [ ] （可选）从 UserProfile 扩充 RL prompt 集
 - [ ] 选定并安装 GRPO 框架（TRL GRPOTrainer）
 - [ ] 定 thinking/non-thinking 起点 checkpoint
