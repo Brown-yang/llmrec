@@ -24,11 +24,54 @@ from collections import defaultdict
 ITEM_FULL_RE = re.compile(r"<\|\w+?_begin\|><s_a_\d+><s_b_\d+><s_c_\d+>")
 # capture the first sub-token (s_a) value -- the report's diversity is over s_a (coarse category)
 ITEM_SA_RE = re.compile(r"<\|\w+?_begin\|><s_a_(\d+)><s_b_\d+><s_c_\d+>")
+# parse a full itemic pattern into (domain, s_a, s_b, s_c)
+ITEM_PARSE_RE = re.compile(r"<\|(\w+?)_begin\|><s_a_(\d+)><s_b_(\d+)><s_c_(\d+)>")
+
+# graded partial-credit weights (RL_DESIGN.md: dense reward to fight the ~0.5% exact-hit
+# sparsity). A generated item scores against the BEST-matching gold item, requiring same
+# domain: full 3-token match=1.0, first-two (s_a+s_b)=0.6, first (s_a, coarse category)=0.3.
+GRADE_FULL, GRADE_AB, GRADE_A = 1.0, 0.6, 0.3
 
 
 def extract_items(text: str) -> list[str]:
     """All full itemic patterns in order of appearance (may repeat)."""
     return ITEM_FULL_RE.findall(text)
+
+
+def parse_item(s: str):
+    """'<|video_begin|><s_a_1><s_b_2><s_c_3>' -> ('video', 1, 2, 3), else None."""
+    m = ITEM_PARSE_RE.match(s.strip())
+    return (m[1], int(m[2]), int(m[3]), int(m[4])) if m else None
+
+
+def _graded_pair(gen, gold) -> float:
+    """Partial-credit score between one generated item and one gold item (same-domain required)."""
+    if gen is None or gold is None or gen[0] != gold[0]:
+        return 0.0
+    (_, ga, gb, gc), (_, da, db, dc) = gen, gold
+    if (ga, gb, gc) == (da, db, dc):
+        return GRADE_FULL
+    if (ga, gb) == (da, db):
+        return GRADE_AB
+    if ga == da:
+        return GRADE_A
+    return 0.0
+
+
+def graded_reward(completion: str, gold) -> float:
+    """Dense accuracy signal: best partial match of any generated item vs any gold item.
+    Returns in [0,1]: 1.0 exact, 0.6 first-two sub-tokens, 0.3 first sub-token (category), 0 else."""
+    gens = [parse_item(x) for x in extract_items(completion)]
+    golds = [parse_item(x) for x in normalize_gold(gold)]
+    best = 0.0
+    for gi in gens:
+        for go in golds:
+            s = _graded_pair(gi, go)
+            if s > best:
+                best = s
+                if best == GRADE_FULL:
+                    return best
+    return best
 
 
 def extract_sa(text: str) -> list[int]:
@@ -85,32 +128,37 @@ def group_reward(completions: list[str], gold, use_recall: bool = False) -> list
     return [acc_fn(c, gold) * div for c in completions]
 
 
-def make_grpo_reward_func(use_recall: bool = False, diversity: bool = True):
+def make_grpo_reward_func(accuracy: str = "graded", diversity: bool = True,
+                          div_weight: float = 1.0):
     """Return a TRL-GRPOTrainer-compatible reward function.
 
-    TRL calls reward_func(prompts, completions, **cols) where `completions` is the whole
-    batch (several prompts x num_generations each) and dataset columns (e.g. `gold`) come
-    through kwargs as parallel lists. We group by prompt to compute the shared R_div.
+    accuracy: "exact"  -> R_rule 0/1 (report eq8, sparse ~0.5% hit)
+              "recall" -> fraction of gold covered
+              "graded" -> partial credit 0.3/0.6/1.0 (DENSE, recommended vs sparse hits)
+    diversity: multiply by R_div (report eq7). div_weight lets you soften it:
+               reward = acc * (1 - div_weight + div_weight * R_div).
+
+    TRL calls reward_func(prompts, completions, **cols); `completions` is the whole batch
+    (several prompts x num_generations) and dataset cols (e.g. `gold`) arrive as kwargs.
+    We group by prompt to compute the shared R_div.
     """
+    acc_fn = {"exact": itemic_hit, "recall": recall_hit, "graded": graded_reward}[accuracy]
 
     def reward_func(prompts, completions, gold=None, **kwargs):
         n = len(completions)
         golds = gold if gold is not None else [None] * n
-        # group indices by prompt string (TRL keeps a prompt's generations contiguous, but
-        # we group defensively so it works regardless of ordering)
         groups = defaultdict(list)
         for i, p in enumerate(prompts):
-            key = p if isinstance(p, str) else str(p)
-            groups[key].append(i)
+            groups[p if isinstance(p, str) else str(p)].append(i)
 
         rewards = [0.0] * n
         for _, idxs in groups.items():
             comps = [completions[i] for i in idxs]
-            g = golds[idxs[0]]  # same gold across a prompt's generations
+            g = golds[idxs[0]]
             div = diversity_factor(comps) if diversity else 1.0
-            acc_fn = recall_hit if use_recall else itemic_hit
+            div_mult = (1 - div_weight) + div_weight * div
             for i in idxs:
-                rewards[i] = acc_fn(completions[i], g) * div
+                rewards[i] = acc_fn(completions[i], g) * div_mult
         return rewards
 
     return reward_func
@@ -133,6 +181,13 @@ if __name__ == "__main__":
     gr = group_reward(comps, gold)
     # only the exact-hit completion gets R_rule=1, times shared div
     assert gr[0] == d and gr[1] == 0.0, gr
+    # graded partial credit: gold s_a=100,s_b=2,s_c=3 (video)
+    assert graded_reward(hit, gold) == 1.0                                   # full
+    assert graded_reward("<|video_begin|><s_a_100><s_b_2><s_c_99>", gold) == 0.6   # s_a+s_b
+    assert graded_reward("<|video_begin|><s_a_100><s_b_9><s_c_9>", gold) == 0.3    # s_a only
+    assert graded_reward("<|prod_begin|><s_a_100><s_b_2><s_c_3>", gold) == 0.0     # wrong domain
+    assert graded_reward(miss, gold) == 0.0
+    print("graded partial-credit OK")
     # TRL-style: 2 prompts x 2 gens
     rf = make_grpo_reward_func()
     prompts = ["pA", "pA", "pB", "pB"]

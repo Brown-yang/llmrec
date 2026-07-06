@@ -20,10 +20,12 @@ reward signal is strong enough before committing to full GRPO.
 import argparse
 import json
 
+from collections import defaultdict
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from reward import extract_items, extract_sa, itemic_hit, diversity_factor
+from reward import extract_items, extract_sa, itemic_hit, diversity_factor, graded_reward, parse_item
 
 BASE = "/home/lab/wy/LLM_REC/OneReason-0.8B-pretrain-competition"
 
@@ -62,38 +64,61 @@ def main():
     rows = [json.loads(l) for l in open(args.prompts, encoding="utf-8")][: args.limit]
 
     hit_dump = open(args.dump_hits, "w", encoding="utf-8") if args.dump_hits else None
-    n_prompts, n_hit_prompts, total_hits, div_sum = 0, 0, 0, 0.0
+    # per-domain stats keyed by the gold item's domain (video/prod/ad/living)
+    dom = defaultdict(lambda: {"n": 0, "hit_prompts": 0, "hits": 0,
+                               "graded_signal_prompts": 0, "graded_sum": 0.0, "div_sum": 0.0})
+
+    def gold_domain(gold):
+        p = parse_item(gold[0]) if gold else None
+        return p[0] if p else "?"
 
     for i, r in enumerate(rows):
         comps = sample(model, tokenizer, r["prompt"], args.n,
                        args.temperature, args.top_p, args.max_new_tokens)
         gold = r["gold"]
+        d = gold_domain(gold)
         hits = [c for c in comps if itemic_hit(c, gold) == 1.0]
-        n_prompts += 1
-        n_hit_prompts += 1 if hits else 0
-        total_hits += len(hits)
-        div_sum += diversity_factor(comps)
+        best_graded = max((graded_reward(c, gold) for c in comps), default=0.0)
+
+        s = dom[d]
+        s["n"] += 1
+        s["hit_prompts"] += 1 if hits else 0
+        s["hits"] += len(hits)
+        s["graded_signal_prompts"] += 1 if best_graded > 0 else 0  # got any partial credit
+        s["graded_sum"] += best_graded
+        s["div_sum"] += diversity_factor(comps)
 
         if hit_dump is not None:
             for c in hits:
-                # reconstruct an alpaca SFT record from the successful rollout
                 hit_dump.write(json.dumps({
-                    "instruction": r["instruction"],
-                    "input": "",
-                    "output": c.strip(),
-                    "system": r.get("system", ""),
+                    "instruction": r["instruction"], "input": "",
+                    "output": c.strip(), "system": r.get("system", ""),
                 }, ensure_ascii=False) + "\n")
 
         if (i + 1) % 20 == 0:
-            print(f"  ...{i+1}/{len(rows)}  pass@{args.n} so far={n_hit_prompts/n_prompts*100:.1f}%")
+            t = sum(v["n"] for v in dom.values())
+            hp = sum(v["hit_prompts"] for v in dom.values())
+            gp = sum(v["graded_signal_prompts"] for v in dom.values())
+            print(f"  ...{i+1}/{len(rows)}  exact-Pass@{args.n}={hp/t*100:.1f}%  graded-signal={gp/t*100:.1f}%")
 
-    if hit_dump:
+    if hit_dump is not None:
         hit_dump.close()
-    print(f"\n[rollout] prompts={n_prompts}  Pass@{args.n}={n_hit_prompts/n_prompts*100:.1f}%  "
-          f"avg_hits/prompt={total_hits/n_prompts:.2f}  avg_div={div_sum/n_prompts:.3f}")
+
+    print(f"\n===== rollout stats (N={args.n}, T={args.temperature}) =====")
+    print(f"{'domain':<8}{'n':>5}{'exactPass@N':>13}{'gradedSignal':>14}{'avgGraded':>11}{'avgDiv':>9}")
+    tot = {k: 0 for k in ("n", "hit_prompts", "graded_signal_prompts", "hits")}
+    tot.update({"graded_sum": 0.0, "div_sum": 0.0})
+    for d, s in sorted(dom.items()):
+        for k in tot:
+            tot[k] += s[k]
+        print(f"{d:<8}{s['n']:>5}{s['hit_prompts']/s['n']*100:>12.1f}%"
+              f"{s['graded_signal_prompts']/s['n']*100:>13.1f}%"
+              f"{s['graded_sum']/s['n']:>11.3f}{s['div_sum']/s['n']:>9.3f}")
+    n = tot["n"]
+    print(f"{'ALL':<8}{n:>5}{tot['hit_prompts']/n*100:>12.1f}%"
+          f"{tot['graded_signal_prompts']/n*100:>13.1f}%{tot['graded_sum']/n:>11.3f}{tot['div_sum']/n:>9.3f}")
     if args.dump_hits:
-        print(f"[RFT] wrote {total_hits} hit rollouts -> {args.dump_hits} "
-              f"(register + SFT with LLaMA-Factory to do rejection-sampling fine-tuning)")
+        print(f"\n[RFT] wrote {tot['hits']} exact-hit rollouts -> {args.dump_hits}")
 
 
 if __name__ == "__main__":
