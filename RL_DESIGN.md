@@ -159,9 +159,15 @@
 - [x] `rl/build_rl_prompts.py`：从官方懂推荐构造 (prompt, gold) 集。
 - [x] `rl/train_grpo.py`：GRPO 训练脚本框架（TRL GRPOTrainer + LoRA + 分级reward），等A100直接跑。
 
+## 24GB 卡验证结论（2026-07-06）
+- ✅ 管线跑通：修好 TRL0.24+transformers5.6 兼容（`pip install mergekit llm-blender weave` + `TRANSFORMERS_CACHE`/`warnings_issued` shim，均写进 `train_grpo.py`）。
+- ✅ 显存：G=16 / prompt 1536 ≈ 18.9GB（G=16 / prompt 2048 ≈ 23.9GB 快 OOM，故降到 1536）。
+- ⚠️ reward 训练时一直平在 ~0.005 没上升 → 200-300 步、无稳定器、beta=0、**prompt 截到 1536** 都是原因。
+- ⚠️ **prompt 长度隐患**：`build_rl_prompts.py` 保留到 4096，但 GRPO 训练截到 1536 → 懂推荐长用户历史被左截断切掉，上下文变少，信号可能弱于探测时的 31%（探测用完整 prompt）。
+
 ## 待做（RL-2，等A100）
+- [ ] **prompt 长度放开到 2048–4096**（当前 1536 是 24GB 卡的妥协）。A100(40/80GB)让模型看到完整用户历史 → 信号更强，是 reward 能否上升的关键之一。
 - [ ] 在 `train_grpo.py` 里实现 stage-wise clipping（itemic紧clip防塌缩）+ 负样本降权（需子类化 GRPOTrainer）
+- [ ] 放开 G（24GB 只到 16；A100 可 32+）、更多步（当前 200-300 太短）
 - [ ] 决定 thinking/non-thinking 起点，跑 GRPO，div_sa 护栏 + 正式评测确认
-- [ ] （可选）从 UserProfile 扩充 RL prompt 集
-- [ ] 选定并安装 GRPO 框架（TRL GRPOTrainer）
-- [ ] 定 thinking/non-thinking 起点 checkpoint
+- [ ] 从 UserProfile 扩充 RL prompt 集（当前只用官方懂推荐 2000 条）
