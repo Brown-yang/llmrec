@@ -1,0 +1,254 @@
+# OneReason-0.8B 竞赛微调 · 工作进展与交接文档
+
+> 最后更新：2026-07-05（读完 OneReason 技术报告全文，重大策略修正）
+> 用途：交接给 agent 继续工作。读完本文即可知道「做过什么、结论是什么、从哪继续」。
+
+---
+
+## 0. 一句话现状
+
+当前竞赛最高分仍是 **v1.0.0 = 0.8596**（官方数据 + 1 epoch + **纯 LoRA**，什么都没改）。所有「改进」都没超过它。**已读完技术报告全文，找到了根本原因**：懂推荐评测是 **Pass@K/Recall@K（采样一组候选看召回，多样性是命根子）**，而我们之前的 proxy（teacher-forced itemic_loss + 贪婪 Pass@1）测的是**反相关**的东西。exp2（解冻/全量训练 embed+lm_head）在错误 proxy 上"更好"，正式评测（v1.0.3）却暴跌到 0.7212——因为全量训 lm_head 导致**itemic token 熵塌缩**，杀死了召回多样性。**embed/lm_head 训练已确认是死路。** 下一步：重建采样式 Recall@K proxy + 回到纯 LoRA + 中长期做 RL(GRPO)。
+
+---
+
+## 1. 竞赛规则要点
+
+- **赛事**：快手探索者 LLM-Rec 挑战赛，平台 = 快手万擎（StreamLake）<https://www.streamlake.com/product/wanqing>
+- **基座模型**：`OneReason-0.8B-pretrain-competition`（本地路径 `/home/lab/wy/LLM_REC/OneReason-0.8B-pretrain-competition`）
+  - Qwen3ForCausalLM，28 层，hidden 1024，**vocab_size 176253**（含扩展的 itemic token）
+  - 初赛只能基于此模型迭代，**评测严格校验 config 与 baseline 一致**，不能改架构
+- **评测**：OneRec Benchmark，四维度 `懂物料 / 懂用户 / 懂推荐 / 懂世界`
+  - **总分 = 8 个子分数直接相加**（不是平均）：懂物料×1 + 懂用户×2 + 懂推荐×4 + 懂世界×1
+  - ⚠️ **懂推荐拆成 4 个子任务，占 8 个槽位里的 4 个 = 隐性权重 50%**，是决定总分的大头
+  - **正式评测每天限 3 次**，评测本身耗时 40-50 分钟 → 必须靠本地 proxy 调参，正式评测只留给有把握的版本
+- **提交方式**（万擎官方入口，均支持）：
+  - **LoRA**：上传 `adapter_model.safetensors` + `adapter_config.json`（**无需 merge 成完整模型**）
+  - 全参：上传 `model.safetensors`（分片则加 `model.safetensors.index.json`）
+  - 训练方法选 lora/全参，模型类型选「文本生成」
+- 线下训练官方建议 Transformers **v5.3.0**（⚠️ 我们环境是 5.6.0，见 §2 风险）
+- 允许外部数据、蒸馏；不鼓励模型融合；复赛需交数据构造脚本+训练脚本复现
+
+---
+
+## 2. 环境
+
+- **conda env `onerec`**（python 3.11）：`source /home/lab/miniconda3/etc/profile.d/conda.sh && conda activate onerec`
+- torch **2.11.0+cu128**（匹配驱动 CUDA 12.8），torchvision/torchaudio 也是 cu128 版
+- **LLaMA-Factory 0.9.6.dev0**，路径 `/home/lab/wy/LLM_REC/LLaMA-Factory`，transformers **5.6.0**
+- **GPU：单卡 RTX A5000 24GB**（桌面占用约 5GB，可用约 19GB）。⚠️ **用户 A100 服务器即将就绪，之后按 A100 来**
+- 训练统一加 `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 缓解显存碎片
+- ⚠️ **风险**：transformers 5.6.0 vs 官方建议 5.3.0。目前无报错，但若评测端严格校验版本兼容，可能是隐藏风险，必要时固定到 5.3.0 重装。
+
+---
+
+## 3. 数据
+
+### 3.1 官方 SFT 数据（万擎平台下载）
+路径：`/home/lab/wy/LLM_REC/datasets/dataset_orin/`，共 **32,480 条**，格式每行 `[{"system","prompt","response"}]`
+- 懂推荐1-4.jsonl：**19,204**（权重最大）
+- 懂物料part1-7.jsonl：**10,384**（part1商品/part2主播/part3广告/part4短视频=描述→token；part5商品/part6广告/part7短视频=token→描述）
+- 懂用户.jsonl：**2,892**（长行为时间线→按主题筛选相关行为，JSON 数组输出）
+
+### 3.2 HF 原始行为大数据集
+路径：`/home/lab/wy/LLM_REC/datasets/OpenOneRec/Explorer_LLM_Rec_Competition/data/`
+- `OneReason_UserProfile/`：**50 万用户**原始多域行为序列（raw pid，非 SID），63 字段
+- `OneReason_Pid2Sid/`：pid → 三段式语义ID `[s_a,s_b,s_c]`（198 parquet）
+- `OneReason_Pid2Caption/`：pid → 文字描述（136 parquet，video是段落/goods是短标题/live是关键词列表）
+- `OneReason_Pid2Tag/`：pid → 三级类目标签
+- `OneReason_General/`：通用对话/推理数据（保通用能力用）
+- join 规则：`(domain, pid)`，domain 取值 `video/video`(视频) `video/ad`(广告) `goods`(电商) `live`(直播)
+
+### 3.3 自建增强数据（写在 dataset_orin/ 下）
+- `懂物料_augmented.jsonl`：**26,522** — 从官方数据揪出「没 grounding 的目标物品」→ Pid2Sid 反查 pid → Pid2Caption 拿真实描述 → 套官方模板生成。**这份质量可信。**
+- `懂推荐_augmented.jsonl`：**25,000** — 从 UserProfile 抽 2.5万用户，按域切「历史→目标」构造。⚠️ **有 bug（见 §6）**
+- `懂世界_augmented.jsonl`：**2,500** — OneReason_General 采样，保通用能力
+
+---
+
+## 4. 数据处理管线
+
+主脚本：`/home/lab/wy/LLM_REC/datasets/prepare_sft_data.py`
+处理步骤：①展平数组 ②剥离 response 开头的 `<think>...</think>`（做 non-thinking SFT）③统一 prompt 结尾为 `/no_think` ④超长样本**智能截断**（保留结尾指令，二分查找裁掉最早期行为历史，插入「（注：更早期的行为记录已省略）」提示，而非整条丢弃）
+- 环境变量：`EXCLUDE_AUGMENTED=1` 只用官方数据；`OUT_TRAIN=<path>` 指定输出
+- 输出注册在 `LLaMA-Factory/data/dataset_info.json`：`onerec_sft`（全量86k）、`onerec_sft_exp1`（官方32k）
+
+增强数据构造脚本（都在 datasets/）：
+- `build_item_grounding_augment.py` → 懂物料_augmented（依赖 /tmp/found_captions.pkl）
+- `build_rec_augment.py` → 懂推荐_augmented ⚠️**有 goods bug**
+- `build_general_augment.py` → 懂世界_augmented
+
+---
+
+## 5. 本地评估工具（附带一个重要教训：本地 proxy 的 Pass@K 不可信）
+
+**固定评估集**：`/home/lab/wy/LLM_REC/datasets/eval_set.jsonl`（900 条，物料/用户/推荐各 300，**只从官方数据抽、永不参与训练、每次实验都用同一批**）。构建脚本 `build_eval_set.py`。
+- ⚠️ **局限**：目标物品是"训练分布内"的，且每条只有 **1 个 gold**。而真实竞赛测的是 **Recall@64 over 平均 14 个"全新"目标物品**（报告 Table 22：Video 95.3% 训练没见过）。**分布不匹配 → 本地命中率会奖励记忆/塌缩，与真实分数反相关。**
+
+**两个评估脚本**：
+1. `eval_split_loss.py` —— teacher-forced `itemic_loss` + 贪婪 `Pass@1`。**❌ 已废弃**：与真实 Recall@K 反相关（越自信=分布越尖=多样性越差=真实召回越低）。当初就是它误导我们提交了 exp2。
+2. `eval_split_loss_recall.py` —— 采样式 `Pass@k/Recall@k` + **多样性 `div_sa/div_tok`**。用法 `python eval_split_loss_recall.py --adapter <dir> --k 32 --limit 300 --categories tuijian`。
+
+**⚠️ 回溯验证结论（2026-07-05，两个 proxy 都做了）**：拿"已知 exp2<champion"这个事实去验证，结果——
+- **两个 proxy 的 Pass@K 都反了**：exp2 本地 Pass@32=4.7% > exp1 的 1.3%，但真实 exp2 更差。**根因**：本地评估集是"分布内+单目标"，exp2 熵塌缩后概率集中到少数"像训练数据"的高频物品→本地命中虚高，但真实"新物品+多目标"召回需要多样性→真降。
+- **唯一可靠的信号是 `div_sa`（多样性）**：exp2=15.42 < exp1=17.40，**正确检测到熵塌缩**。→ 把 `div_sa` 当**"塌缩护栏"**：训练后测一下，多样性掉了就是危险信号，别提交。
+
+**结论**：**无法用现有数据造出可信的分数 proxy**（不知道竞赛测试集的新物品分布、造不出多目标 gold）。务实三条腿：①靠报告的原则性设计（non-thinking / 冻结 itemic / CoT 混合 / RL 带多样性奖励）②`div_sa` 当护栏 ③正式评测省着用，只留给"设计上确实不同"的方案。**别再靠本地 Pass@K 微调调参。**
+
+---
+
+## 6. ⚠️ 已知 Bug（待修）
+
+**`build_rec_augment.py` 的 goods 域历史字段用错了**：
+- 用了 `ec_colossus_rs_item_id_list` 当「浏览了商品」，但实测这字段是「系统曾展示的候选」，**86.8% 从未被点击**
+- 等于给模型喂了大量假的「浏览行为」噪音 → 拖累 v1.0.2 得分
+- **修法**：改用 `ec_good_click_item_id_list_extend`（真实点击，中位320）或 `ec_good_order_item_id_list_extend`（购买）
+- 这是 v1.0.2 得分暴跌（0.7354）的主因之一
+
+---
+
+## 7. 实验记录
+
+### 7.1 正式评测（消耗每日 3 次配额）
+
+| 版本/模型 | 配置 | 总分 | 懂物料 | 懂用户(2项) | 懂推荐(4项) | 懂世界 | 备注 |
+|---|---|---|---|---|---|---|---|
+| **v1.0.0** | 官方32k, 1ep, **纯LoRA, non-thinking** | **0.8596** | 0.1533 | 0.1006 | **0.4726** | 0.1331 | **CHAMPION** |
+| v1.0.1 | 官方32k, 3ep, LoRA | 0.8447 | 0.1533 | 0.1194 | 0.4323 | 0.1398 | 3轮过拟合 |
+| exp1 | 官方32k, 1ep, LoRA, **智能截断**, non-thinking | 0.8529 | **0.1840** | 0.1049 | 0.4373 | 0.1268 | ≈champion；懂物料↑但懂推荐↓(智能截断伤懂推荐) |
+| v1.0.2 | 增强86k, ~1000step, LoRA | 0.7354 | 0.1533 | 0.0911 | 0.3437 | 0.1472 | goods bug + 未训完 |
+| v1.0.3 | exp2=官方32k+**解冻embed/lm_head**(全参提交) | 0.7212 | 0.1533 | 0.1053 | 0.3310 | 0.1316 | 熵塌缩,懂推荐崩 |
+| **raw@1500** | 官方32k, **最少处理:保留CoT+/think(thinking模式)**, LoRA | **0.7575** | 0.1533 | 0.0947 | **0.3987** | 0.1108 | **近收敛(eval1.436≈final1.429)。thinking模式伤懂推荐** |
+
+**两条被硬证实的规律**：
+1. **thinking < non-thinking(报告Table 14 + raw实测双重证实）**：raw 保留 CoT+`/think` 走 thinking 模式，近收敛也只有 0.7575，懂推荐 0.3987 全场最低。**champion/exp1 高，核心是 non-thinking**。报告说的"CoT有用"是"训练带CoT + 推理non-thinking"，raw 是"训练带CoT + 推理thinking"，组合错了。
+2. **"处理越少越好"被反驳**：exp1(**完整处理**,non-thinking)=0.8529≈champion；raw(**最少处理**,thinking)=0.7575。**处理动作本身无害**——剥CoT+强制no_think 恰好把模型推到正确的 non-thinking 模式，是帮忙不是添乱。真正的变量是 non-thinking vs thinking，不是处理多少。
+3. 分数下降元凶归因：v1.0.1=3轮过拟合；v1.0.2=goods bug；v1.0.3=熵塌缩(embed/lm_head)；raw=thinking模式。**champion 是纯 LoRA + non-thinking，问题从来不是 LoRA、不是"处理"。**
+
+### 7.2 本地对照实验（不消耗评测配额，用固定评估集，limit 300）
+
+| 实验 | 配置 | eval_loss(训练) | 懂物料 itemic/P@1 | 懂用户 itemic/P@1 | 懂推荐 itemic/P@1 | ALL itemic/P@1 |
+|---|---|---|---|---|---|---|
+| base | 原始未微调 | — | 7.66 / 0% | 2.05 / 0% | 3.77 / 0% | 2.75 / 0% |
+| **exp1** | 官方32k+智能截断, 1ep, LoRA all | 1.349 | 2.81 / 1.0% | 0.61 / 0% | 3.54 / 1.1% | 1.26 / 0.8% |
+| **exp2** | exp1 + 解冻 embed/lm_head | 1.424 | **2.32 / 3.0%** | **0.43 / 2.0%** | **3.31 / 1.1%** | **1.05 / 2.0%** |
+
+- exp1 配置：`LLaMA-Factory/examples/train_lora/onereason_lora_sft_exp1.yaml`，输出 `saves/onereason-0.8b/lora/exp1/`
+- exp2 配置：`LLaMA-Factory/examples/train_lora/onereason_lora_sft_exp2.yaml`（唯一区别 `additional_target: embed_tokens,lm_head`），输出 `saves/onereason-0.8b/lora/exp2/`
+- **注意**：`additional_target` 在 LLaMA-Factory 里是**全量训练**这两层（不是低秩），exp2 可训练参数 366M(31%)。单卡训练时显存峰值约 23.4GB/24.5GB（能跑但很紧）。
+- ⚠️ 训练 eval_loss（从训练数据切2%）与固定评估集方向不一致：训练eval_loss exp2更高，但固定均衡评估集 exp2 全面更好。**以固定评估集为准**（同 900 条、均衡、可比）。
+
+---
+
+## 8. 核心发现（读完技术报告后的最终诊断）
+
+> ⚠️ 本节已根据 OneReason 技术报告（arXiv:2606.06260）全文重写。之前"解冻 embed/lm_head 有效"的结论**是错的**——那是被错误 proxy 误导。
+
+### 8.1 之前 proxy 为什么把我们带偏了（最重要的教训）
+- 我们的 `eval_split_loss.py` 测的是 **teacher-forced itemic_loss + 贪婪 Pass@1**。
+- 但报告 §3.2 / 附录 B.4 明确：**懂推荐(R3)评测 = Pass@K/Recall@K**——采样一组候选、解码成 item、看召回，**候选多样性是命根子**（RL 奖励里专门有 `R_div` 奖励第一位 sub-token 的多样性，eq 7-9）。
+- **teacher-forced itemic_loss 和 Recall@K 反相关**：交叉熵越低=分布越尖=采样多样性越差=Recall@K 越低。所以 exp2 在旧 proxy 上"更好"，正式评测反而崩。
+
+### 8.2 exp2/embed-lm_head 训练为什么是死路（报告三重印证）
+1. **Figure 12(a) 直接命名 "itemic token entropy collapse"**：对 itemic token 做太激进的更新会熵塌缩，报告专门用**更紧的 clip** 保护 itemic token。exp2 全量高 LR 训 lm_head = 反着来。
+2. **训练配方 Table 4**：embed/lm_head 只在**预训练 Stage 1**（110B token、冻结文本层、LR 2e-4→1e-5）训练一次让 itemic 嵌入 settle。下载的 checkpoint 已做过。在 32K SFT 数据上重训=破坏预训练学好的空间。
+3. **GRPO 讨论**：连 RL 都会"sharpen the output distribution... not fully aligned with recommendation"，所以才要加多样性奖励。
+
+### 8.3 报告确认我们对的两个大方向
+- **懂推荐 SFT non-thinking > thinking**（Table 9/14，thinking 只有 RL 后才反超）→ 我们用 `/no_think` 正确。
+- **纯 LoRA 天然冻结 embed/lm_head → 保住 itemic 分布熵** → 这正是 champion(LoRA)赢、exp2(全量动itemic层)崩的真正原因。
+
+### 8.4 任务本质：主要是泛化，不是记忆（Table 22）
+| 域 | 记忆型 | 泛化型 |
+|---|---|---|
+| Video | 4.7% | **95.3%** |
+| Product | 27.8% | 72.2% |
+| Ad | 75.9% | 24.1% |
+| Live | 73.0% | 27.0% |
+- Video/Product 目标 95%/72% 训练没见过→只能泛化，Recall 天然低；Ad/Live 记忆型多→分数天然高。exp2 懂推荐第1子任务崩到 0.0096，大概率就是泛化最难的 Video 域被熵塌缩杀死。
+
+### 8.5 报告给出的可用杠杆
+- **CoT 混合训练有用**（Table 17）：保留部分 `<think>` 数据（即使 non-thinking 推理）提升召回，各域最优 CoT 比例不同（Fig 25: Video~55% / Product~95% / Live~55% / Ad~25%）。**我们把 CoT 全剥了，可能丢了这块。**
+- **推理要紧凑**（Fig 8）：interest expansion 宽度 n∈{1,3,5} 优于 10/20。
+- **真正大杠杆是 RL**：报告懂推荐增益(+12%~73% on Recall@K)全来自 recommendation-oriented GRPO（两阶段 rollout + accuracy×diversity 奖励 + itemic 紧 clip 防熵塌缩 + 负样本降权）+ RFT/MOPD。**竞赛不提供 RL 代码→这是最大差异化空间。**
+
+---
+
+## 9. 下一步（决策与待办 · 已按技术报告修正）
+
+### 铁律（不可再违反，都是评测次数买来的）
+- **必须 non-thinking**：`/no_think` + 剥 CoT。thinking 模式伤懂推荐（报告 Table 14 + raw@1500=0.7575 双证）。
+- **SFT 里永远不要训练 embed_tokens / lm_head**。纯 LoRA 自动冻结它们（正确）。exp2/v1.0.3=0.7212 熵塌缩。
+- **"处理动作"本身无害**（展平/剥CoT/强制no_think 是帮忙），不要因为"少处理"就保留 CoT+thinking。
+- **本地 Pass@K 不可信**（分布内+单目标，奖励塌缩）；只把 `div_sa` 当塌缩护栏用（见 §5）。
+
+### 当前最优基线
+- **champion=`saves/.../lora/sft`（0.8596）** 和 **exp1=`saves/.../lora/exp1`（0.8529）**：都是纯LoRA+non-thinking，adapter 20MB 就绪可提交。exp1 懂物料更高(0.184)但懂推荐略低(智能截断所致)。
+
+### 下一步方向（全部 SFT 用 LoRA + non-thinking）
+**立即（便宜、单变量）**
+- [ ] exp3 = exp1 配方 + **超长样本改回"丢弃"**（不用智能截断）。exp1 证明智能截断伤懂推荐(0.4726→0.4373)，champion 的丢弃更好。数据用 `EXCLUDE_AUGMENTED=1`(默认丢弃模式，不加KEEP_COT/NO_TRUNCATE)。看能否恢复懂推荐、保住懂物料涨幅 → 有望超 champion。
+- [ ] 搞清楚 exp1 懂物料涨到 0.1840 的原因（champion 一直 0.1533）。
+
+**数据实验（先用 div_sa 护栏，别浪费评测）**
+- [ ] 修 `build_rec_augment.py` 的 goods bug（§6），加干净的增强数据（懂物料_augmented 质量可信），non-thinking 训练。
+
+**真正的大杠杆（等 A100）**
+- [ ] recommendation-oriented GRPO（报告 §6）。先 LoRA GRPO。懂推荐(50%权重)唯一能实质提升的路。
+
+### 已废弃的死路（别再走，都有评测证伪）
+- ❌ **thinking 模式 / 保留 CoT+`/think`**（=raw@1500=0.7575，报告也说 SFT thinking 更差）
+- ❌ **"最少处理"当灵丹**（raw 最少处理反而最差；真变量是 non-thinking）
+- ❌ 解冻/全量训练 embed/lm_head（=v1.0.3=0.7212，熵塌缩）
+- ❌ 用 itemic_loss / 贪婪 Pass@1 当 proxy（与真实分数反相关）
+
+---
+
+## 10. 常用命令速查
+
+```bash
+# 激活环境
+source /home/lab/miniconda3/etc/profile.d/conda.sh && conda activate onerec
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+cd /home/lab/wy/LLM_REC/LLaMA-Factory
+
+# 生成官方-only 数据集（exp1 用）
+cd /home/lab/wy/LLM_REC/datasets && EXCLUDE_AUGMENTED=1 OUT_TRAIN=.../data/onerec_sft_exp1.jsonl python3 prepare_sft_data.py
+
+# 训练
+llamafactory-cli train examples/train_lora/onereason_lora_sft_exp2.yaml
+
+# 本地分项评估（不占评测次数）
+cd /home/lab/wy/LLM_REC/datasets
+python3 eval_split_loss.py --adapter /home/lab/wy/LLM_REC/LLaMA-Factory/saves/onereason-0.8b/lora/exp2 --limit 300
+python3 eval_split_loss.py --base-only --limit 300   # 原始模型地板参照
+
+# 监控训练（不要用 TaskOutput 看缓存，直接读文件）
+tail -f saves/onereason-0.8b/lora/<exp>/trainer_log.jsonl
+```
+
+## 11. 关键文件地图
+
+```
+/home/lab/wy/LLM_REC/
+├── OneReason-0.8B-pretrain-competition/   # 基座模型（不可改config）
+├── OneReason.pdf                          # 技术报告 arXiv:2606.06260
+├── rec.txt                                # 万擎平台使用说明/FAQ
+├── PROGRESS.md                            # 本文档
+├── datasets/
+│   ├── dataset_orin/                      # 官方12文件 + 3个_augmented
+│   ├── OpenOneRec/Explorer_LLM_Rec_Competition/  # HF原始行为大数据集
+│   ├── prepare_sft_data.py               # 主数据处理管线
+│   ├── build_item_grounding_augment.py   # 懂物料增强
+│   ├── build_rec_augment.py              # 懂推荐增强 ⚠️goods bug
+│   ├── build_general_augment.py          # 懂世界增强
+│   ├── build_eval_set.py                 # 生成固定评估集
+│   ├── eval_split_loss.py                # 分项评估工具（核心）
+│   └── eval_set.jsonl                    # 固定评估集900条
+└── LLaMA-Factory/
+    ├── data/dataset_info.json            # 数据集注册（onerec_sft, onerec_sft_exp1）
+    ├── data/onerec_sft.jsonl             # 全量86k
+    ├── data/onerec_sft_exp1.jsonl        # 官方32k
+    ├── examples/train_lora/onereason_lora_sft_exp1.yaml
+    ├── examples/train_lora/onereason_lora_sft_exp2.yaml
+    └── saves/onereason-0.8b/lora/        # exp1/ exp2/ 等 checkpoint
+```

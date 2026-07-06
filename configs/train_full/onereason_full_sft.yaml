@@ -1,0 +1,42 @@
+### model
+model_name_or_path: /home/lab/wy/LLM_REC/OneReason-0.8B-pretrain-competition
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: full
+
+### dataset
+dataset: onerec_sft
+template: qwen3_nothink
+cutoff_len: 4096
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: saves/onereason-0.8b/full/sft
+logging_steps: 10
+save_steps: 2000
+save_total_limit: 3
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: true  # skip optimizer/scheduler state -> checkpoints are ~1.6GB (bf16 weights) instead of ~10GB+
+report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 1.0e-5   # full fine-tuning needs a much lower LR than LoRA's 1e-4, or it will damage the pretrained weights
+max_steps: 6000         # ~3.2 epochs over the 30,091-example train split (was 1881 steps = 1 epoch)
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval
+val_size: 0.02
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 200

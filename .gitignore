@@ -1,0 +1,27 @@
+# ===== 大文件 / 数据 / 模型 / 权重：一律不进 git =====
+# 基座模型
+OneReason-0.8B-pretrain-competition/
+# 竞赛数据集、HF原始大数据集、所有中间数据
+datasets/dataset_orin/
+datasets/OpenOneRec/
+datasets/*.jsonl
+datasets/*.parquet
+datasets/*.tar.gz
+datasets/eval_set.jsonl
+# LLaMA-Factory 是 clone 的独立仓库（19GB，含自己的 .git）；只通过 configs/ 跟踪我们的配置
+LLaMA-Factory/
+# 技术报告 PDF（21MB）
+OneReason.pdf
+
+# ===== 常规忽略 =====
+__pycache__/
+*.pyc
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+.ipynb_checkpoints/
+*.log
+.DS_Store
+.claude/

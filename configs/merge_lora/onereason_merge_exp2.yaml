@@ -1,0 +1,17 @@
+### Merge exp2 (LoRA + fully-trained embed_tokens/lm_head) into a complete model.
+### exp2's adapter is 1.5GB because it embeds two full layers -> exceeds the LoRA
+### upload limit, so submit via the FULL-PARAM path: this produces a standalone
+### model.safetensors (~1.6GB bf16, fits the <2GB single-file / <5GB total limit).
+### Merge does NOT change config.json, so it still passes the "config == baseline" check.
+
+### model
+model_name_or_path: /home/lab/wy/LLM_REC/OneReason-0.8B-pretrain-competition
+adapter_name_or_path: saves/onereason-0.8b/lora/exp2
+template: qwen3_nothink
+trust_remote_code: true
+
+### export
+export_dir: saves/onereason-0.8b/exp2_merged_full
+export_size: 5          # shard threshold in GB; 5 keeps it a single ~1.6GB file
+export_device: cpu
+export_legacy_format: false
