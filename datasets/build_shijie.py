@@ -73,6 +73,53 @@ def from_cmmlu(bare: bool, limit: int | None):
                 return
 
 
+def _num_distractors(n: float, k: int = 3):
+    """Plausible wrong numeric options near the correct answer n (common arithmetic slips)."""
+    is_int = float(n).is_integer()
+    n = int(n) if is_int else float(n)
+    cand = []
+    for d in [n * 2, n / 2, n + 1, n - 1, n + 2, n - 2, n + 5, n - 5,
+              n + 10, n - 10, int(n * 1.5) if is_int else n * 1.5, n * 3]:
+        d = int(d) if is_int else round(float(d), 2)
+        if d != n and d > 0 and d not in cand:
+            cand.append(d)
+    random.shuffle(cand)
+    out = []
+    for c in cand:
+        if len(out) >= k:
+            break
+        out.append(c)
+    return out
+
+
+def from_gsm8k_zh(path: str, bare: bool, limit: int | None):
+    """meta-math/GSM8K_zh: Chinese math word problems w/ numeric answers -> 4-choice MCQ.
+    Correct answer + 3 plausible numeric distractors (eval math is MCQ, e.g. 路灯 A.55 B.54...)."""
+    random.seed(2026)
+    data = json.load(open(path, encoding="utf-8"))
+    n = 0
+    for row in data:
+        q = row.get("question_zh") or row.get("question")
+        raw = str(row.get("answer_only", "")).strip().replace(",", "")
+        if not q:
+            continue
+        try:
+            correct = float(raw)
+        except ValueError:
+            continue
+        dist = _num_distractors(correct, 3)
+        if len(dist) < 3:
+            continue
+        correct_disp = int(correct) if float(correct).is_integer() else correct
+        opts = [correct_disp] + dist
+        random.shuffle(opts)
+        ans = LETTERS[opts.index(correct_disp)]
+        yield make_record(q, [str(o) for o in opts], ans, bare)
+        n += 1
+        if limit and n >= limit:
+            return
+
+
 def from_jsonl(path: str, bare: bool, limit: int | None):
     """Generic: each line has {question, options:[..] OR A/B/C/D, answer}."""
     n = 0
@@ -94,16 +141,20 @@ def from_jsonl(path: str, bare: bool, limit: int | None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", choices=["cmmlu", "jsonl"], default="cmmlu")
-    ap.add_argument("--input", help="for --source jsonl: path to generic MCQ jsonl")
+    ap.add_argument("--source", choices=["cmmlu", "jsonl", "gsm8k_zh"], default="cmmlu")
+    ap.add_argument("--input", help="for --source jsonl/gsm8k_zh: path to the source file")
     ap.add_argument("--out", default="/home/lab/wy/LLM_REC/datasets/dataset_orin/懂世界.jsonl")
     ap.add_argument("--bare", action="store_true", help="response = bare letter (default: '正确答案是 X')")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--shuffle", action="store_true")
     args = ap.parse_args()
 
-    gen = from_cmmlu(args.bare, args.limit) if args.source == "cmmlu" \
-        else from_jsonl(args.input, args.bare, args.limit)
+    if args.source == "cmmlu":
+        gen = from_cmmlu(args.bare, args.limit)
+    elif args.source == "gsm8k_zh":
+        gen = from_gsm8k_zh(args.input, args.bare, args.limit)
+    else:
+        gen = from_jsonl(args.input, args.bare, args.limit)
     records = list(gen)
     if args.shuffle:
         random.seed(2026)
