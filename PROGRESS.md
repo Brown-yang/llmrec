@@ -7,7 +7,7 @@
 
 ## 0. 一句话现状
 
-当前竞赛最高分仍是 **v1.0.0 = 0.8596**（官方数据 + 1 epoch + **纯 LoRA**，什么都没改）。所有「改进」都没超过它。**已读完技术报告全文，找到了根本原因**：懂推荐评测是 **Pass@K/Recall@K（采样一组候选看召回，多样性是命根子）**，而我们之前的 proxy（teacher-forced itemic_loss + 贪婪 Pass@1）测的是**反相关**的东西。exp2（解冻/全量训练 embed+lm_head）在错误 proxy 上"更好"，正式评测（v1.0.3）却暴跌到 0.7212——因为全量训 lm_head 导致**itemic token 熵塌缩**，杀死了召回多样性。**embed/lm_head 训练已确认是死路。** 下一步：重建采样式 Recall@K proxy + 回到纯 LoRA + 中长期做 RL(GRPO)。
+当前竞赛最高分仍是 **v1.0.0 = 0.8596**（官方数据 + 1 epoch + **纯 LoRA + non-thinking**，什么都没改）。**所有「改进」无一例外都没超过它**：exp1=0.8529、exp4=0.8063、raw=0.7575、v1.0.2=0.7354、v1.0.3=0.7212。最新一次 exp4（加 26.5k 懂物料 grounding 增强）懂物料反而从 0.1533 掉到 0.1226——**自建增强数据的映射和官方评测有偏差，越帮越忙**（§7.1 规律4）。**结论：SFT 已到天花板 ~0.86，任何数据增强/配方改动都降分。突破 0.9 只能靠 RL(GRPO) 撬动占 50% 权重的懂推荐。** RL 基础设施已搭好（`RL_DESIGN.md`/`rl/`，分级奖励验证 31% 信号密度，管线在 24GB 卡跑通），等 A100 补两个稳定器开跑。冲 0.9 的两点明确结论见 §9「冲 0.9 的两点」。
 
 ---
 
@@ -118,11 +118,14 @@
 | v1.0.2 | 增强86k, ~1000step, LoRA | 0.7354 | 0.1533 | 0.0911 | 0.3437 | 0.1472 | goods bug + 未训完 |
 | v1.0.3 | exp2=官方32k+**解冻embed/lm_head**(全参提交) | 0.7212 | 0.1533 | 0.1053 | 0.3310 | 0.1316 | 熵塌缩,懂推荐崩 |
 | **raw@1500** | 官方32k, **最少处理:保留CoT+/think(thinking模式)**, LoRA | **0.7575** | 0.1533 | 0.0947 | **0.3987** | 0.1108 | **近收敛(eval1.436≈final1.429)。thinking模式伤懂推荐** |
+| **exp4** | 官方32k + **懂物料grounding增强26.5k**, 1ep, LoRA, drop截断, non-thinking | **0.8063** | **0.1226** | 0.0935 | 0.4600 | 0.1301 | **懂物料增强backfire**：全维度都低于champion，懂物料掉最多(0.1226<champion0.1533<exp1 0.184) |
 
 **两条被硬证实的规律**：
 1. **thinking < non-thinking(报告Table 14 + raw实测双重证实）**：raw 保留 CoT+`/think` 走 thinking 模式，近收敛也只有 0.7575，懂推荐 0.3987 全场最低。**champion/exp1 高，核心是 non-thinking**。报告说的"CoT有用"是"训练带CoT + 推理non-thinking"，raw 是"训练带CoT + 推理thinking"，组合错了。
 2. **"处理越少越好"被反驳**：exp1(**完整处理**,non-thinking)=0.8529≈champion；raw(**最少处理**,thinking)=0.7575。**处理动作本身无害**——剥CoT+强制no_think 恰好把模型推到正确的 non-thinking 模式，是帮忙不是添乱。真正的变量是 non-thinking vs thinking，不是处理多少。
-3. 分数下降元凶归因：v1.0.1=3轮过拟合；v1.0.2=goods bug；v1.0.3=熵塌缩(embed/lm_head)；raw=thinking模式。**champion 是纯 LoRA + non-thinking，问题从来不是 LoRA、不是"处理"。**
+3. 分数下降元凶归因：v1.0.1=3轮过拟合；v1.0.2=goods bug；v1.0.3=熵塌缩(embed/lm_head)；raw=thinking模式；**exp4=懂物料增强backfire**。**champion 是纯 LoRA + non-thinking，问题从来不是 LoRA、不是"处理"。**
+4. **⚠️ 数据增强全部 backfire（2026-07-06，exp4 log 诊断）**：exp4 加了 26.5k 懂物料 grounding 增强，懂物料反而从 champion 的 0.1533 掉到 **0.1226**（exp1 无增强 0.184 最高）。log 量化分析：三者候选多样性都~10(distinct s_a)，**不是多样性问题，是准确性**——自建 caption→token 映射和官方评测的精确映射有偏差，训练后把 grounding 带偏。**教训：本地 div_sa 护栏只测懂推荐、测不到懂物料任务，对这次盲；规则/自建增强数据质量不够，SFT 阶段一律别加。**
+5. **SFT 已到天花板（横向铁证）**：champion 0.8596 是所有提交里最高，exp1/exp4/raw/v1.0.2/v1.0.3 **无一例外全部更低**。每一个对 champion 配方的改动（增强/展平/thinking/解冻itemic/智能截断）都降分。**SFT 层面 ~0.86 就是上限，突破要靠 RL。**
 
 ### 7.2 本地对照实验（不消耗评测配额，用固定评估集，limit 300）
 
@@ -184,22 +187,37 @@
 ### 当前最优基线
 - **champion=`saves/.../lora/sft`（0.8596）** 和 **exp1=`saves/.../lora/exp1`（0.8529）**：都是纯LoRA+non-thinking，adapter 20MB 就绪可提交。exp1 懂物料更高(0.184)但懂推荐略低(智能截断所致)。
 
-### 下一步方向（全部 SFT 用 LoRA + non-thinking）
-**立即（便宜、单变量）**
-- [ ] exp3 = exp1 配方 + **超长样本改回"丢弃"**（不用智能截断）。exp1 证明智能截断伤懂推荐(0.4726→0.4373)，champion 的丢弃更好。数据用 `EXCLUDE_AUGMENTED=1`(默认丢弃模式，不加KEEP_COT/NO_TRUNCATE)。看能否恢复懂推荐、保住懂物料涨幅 → 有望超 champion。
-- [ ] 搞清楚 exp1 懂物料涨到 0.1840 的原因（champion 一直 0.1533）。
+### 下一步方向（SFT 已到顶，突破靠 RL）
+- ❌ **SFT 数据/配方实验全部停止**：exp3/增强/goods-fix 等已无意义——exp4 证实增强 backfire，SFT 天花板 ~0.86。别再浪费评测次数在 SFT 变体上。
+- ✅ **提交基线锁定 champion**（0.8596），除非 RL 产出更好的。
 
-**数据实验（先用 div_sa 护栏，别浪费评测）**
-- [ ] 修 `build_rec_augment.py` 的 goods bug（§6），加干净的增强数据（懂物料_augmented 质量可信），non-thinking 训练。
+### 🎯 冲 0.9 的两点明确结论（2026-07-06）
+从 0.86 到 0.9 需 +0.04 绝对分，只有 RL 撬动懂推荐(50%权重)能做到。**两个必须定的点：**
 
-**真正的大杠杆（等 A100）**
-- [ ] recommendation-oriented GRPO（报告 §6）。先 LoRA GRPO。懂推荐(50%权重)唯一能实质提升的路。
+**一、微调方式**
+- SFT 基座：**保持 champion（纯官方 + non-thinking + 冻结itemic的LoRA），不动**。这是 RL 的起点。
+- 突破 0.9 的方式 = **在 champion 之上做 GRPO 强化学习**（不是任何 SFT 方法，SFT 已证明到顶）。
+  - **先 LoRA GRPO**（冻结itemic→防熵塌缩，A100可行，安全）。必须补两个稳定器：stage-wise clipping（itemic紧clip）+ 负样本降权。
+  - 全参 GRPO 作为更高天花板的后备（A100 80GB + itemic塌缩防护），LoRA 到顶再上。
+  - **关键分叉 thinking vs non-thinking**：报告证明 RL 后 thinking>non-thinking。冲 0.9 很可能需要 **thinking-capable 的 SFT 基座 + thinking 模式 GRPO**（报告完整配方）。这比 non-thinking GRPO 赌注大但天花板高。稳妥路径：先 non-thinking GRPO 验证增益，再考虑 thinking 版。
+- reward 用分级部分奖励（`rl/reward.py`，已验证 31% 信号密度；exact 命中仅 0.8% 太稀疏）。
+
+**二、数据集**
+- **SFT 数据：纯官方，绝不增强**（exp4 铁证：增强全 backfire）。
+- **RL 数据（真正的新杠杆）**：RL 用的是 prompt（不是答案对），模型自己 rollout。
+  - 官方懂推荐 19k prompt（`rl/build_rl_prompts.py` 已生成）保 format/质量。
+  - **从 50 万 UserProfile 扩量**当 rollout 输入，用真实未来行为当 ground-truth → 直击懂推荐的泛化/覆盖问题（Table 22：95% 是训练没见过的新物品，SFT 教不会，RL 才能）。
+  - 懂物料若要救：需和官方映射**精确对齐**的 grounding 数据（官方 Pid2Sid 精确解析、不改写 caption），否则像 exp4 一样越帮越忙。当前优先级低于懂推荐。
+
+**一句话**：微调方式 = champion-SFT → GRPO（LoRA先行，thinking为高线）；数据集 = SFT纯官方 + RL用UserProfile扩量的懂推荐prompt。RL 基础设施见 `RL_DESIGN.md` / `rl/`。
 
 ### 已废弃的死路（别再走，都有评测证伪）
-- ❌ **thinking 模式 / 保留 CoT+`/think`**（=raw@1500=0.7575，报告也说 SFT thinking 更差）
+- ❌ **任何 SFT 数据增强**（=exp4=0.8063，懂物料 backfire；v1.0.2 也是）
+- ❌ **SFT 阶段 thinking 模式 / 保留 CoT+`/think`**（=raw@1500=0.7575，报告也说 SFT thinking 更差。注意：RL 阶段 thinking 反而更好，别混淆）
 - ❌ **"最少处理"当灵丹**（raw 最少处理反而最差；真变量是 non-thinking）
 - ❌ 解冻/全量训练 embed/lm_head（=v1.0.3=0.7212，熵塌缩）
 - ❌ 用 itemic_loss / 贪婪 Pass@1 当 proxy（与真实分数反相关）
+- ❌ **本地 div_sa 护栏当万能**（只测懂推荐，对懂物料任务盲，没拦住 exp4 的 backfire）
 
 ---
 
