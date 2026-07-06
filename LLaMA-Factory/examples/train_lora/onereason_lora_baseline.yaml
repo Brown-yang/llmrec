@@ -1,0 +1,63 @@
+### ============================================================================
+### CANONICAL PLAIN-LoRA BASELINE (champion recipe). See PROGRESS.md §8-9.
+###
+### IRON RULES (learned the hard way, do NOT violate):
+###   1. finetuning_type: lora + lora_target: all, and NO `additional_target`.
+###      This keeps embed_tokens / lm_head FROZEN. Training them (exp2 = v1.0.3
+###      = 0.7212) caused itemic-token ENTROPY COLLAPSE and crashed 懂推荐.
+###      Plain LoRA auto-freezes those layers -> preserves itemic distribution
+###      entropy -> good recall diversity. This is why the champion (LoRA) won.
+###   2. template: qwen3_nothink (non-thinking). Report Table 9/14: SFT
+###      non-thinking > thinking for recommendation.
+###   3. 1 epoch. >2 epochs overfit on this small data (v1.0.1).
+###
+### This is functionally identical to exp1 (already trained at saves/.../exp1).
+### Use this as the reference recipe to build Tier-2 experiments on top of
+### (keep-CoT mixture, fixed-goods augmented data) -- change ONE variable at a time.
+### ============================================================================
+
+### model
+model_name_or_path: /home/lab/wy/LLM_REC/OneReason-0.8B-pretrain-competition
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_target: all
+# NO additional_target -> embed_tokens / lm_head stay frozen (see IRON RULE 1)
+
+### dataset
+dataset: onerec_sft_exp1   # official 32,480 only, smart-truncated, no augmentation
+template: qwen3_nothink
+cutoff_len: 4096
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: saves/onereason-0.8b/lora/baseline
+logging_steps: 10
+save_steps: 500
+save_total_limit: 3
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 1.0e-4
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval
+val_size: 0.02
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 500

@@ -1,0 +1,13 @@
+### Note: DO NOT use quantized model or quantization_bit when merging lora adapters
+
+### model
+model_name_or_path: /home/lab/wy/LLM_REC/OneReason-0.8B-pretrain-competition
+adapter_name_or_path: saves/onereason-0.8b/lora/sft_v2/checkpoint-4000
+template: qwen3_nothink
+trust_remote_code: true
+
+### export
+export_dir: saves/onereason-0.8b/lora/sft_v2_best_merged
+export_size: 5
+export_device: cpu  # choices: [cpu, auto]
+export_legacy_format: false

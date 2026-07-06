@@ -1,0 +1,52 @@
+### model
+model_name_or_path: /home/lab/wy/LLM_REC/OneReason-0.8B-pretrain-competition
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_target: all
+
+### dataset
+# EXPERIMENT 1: isolate the smart-truncation data-processing change from the
+# epoch-count change. Official 32,480 examples ONLY (no augmented data),
+# smart-truncated (not dropped) long tail, 1 epoch -- everything else matches
+# the v1.0.0 run that scored highest (0.8596) so the only real difference from
+# v1.0.0 is: drop-long-tail -> smart-truncate-long-tail.
+dataset: onerec_sft_exp1
+template: qwen3_nothink
+cutoff_len: 4096
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: saves/onereason-0.8b/lora/exp1
+logging_steps: 10
+save_steps: 200
+save_total_limit: 3
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 1.0e-4
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval
+val_size: 0.02
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 200   # must match save_steps for load_best_model_at_end

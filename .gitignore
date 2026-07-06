@@ -8,8 +8,13 @@ datasets/*.jsonl
 datasets/*.parquet
 datasets/*.tar.gz
 datasets/eval_set.jsonl
-# LLaMA-Factory 是 clone 的独立仓库（19GB，含自己的 .git）；只通过 configs/ 跟踪我们的配置
-LLaMA-Factory/
+# LLaMA-Factory：纳入框架源码+我们的配置，但排除训练产出和生成的数据
+LLaMA-Factory/saves/
+LLaMA-Factory/output/
+LLaMA-Factory/data/onerec_sft*.jsonl
+LLaMA-Factory/.venv/
+LLaMA-Factory/**/__pycache__/
+LLaMA-Factory/*.egg-info/
 # 技术报告 PDF（21MB）
 OneReason.pdf
 

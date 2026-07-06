@@ -1,0 +1,62 @@
+### ============================================================================
+### exp4: SURGICAL AUGMENTATION. official 32k + ONLY 懂物料_augmented (item
+### grounding, real captions from Pid2Caption). Excludes the rule-constructed
+### 懂推荐_augmented (dilution risk, cf v1.0.2=0.7354) and 懂世界_augmented.
+### goods bug FIXED in build_rec_augment.py (irrelevant here since 懂推荐 aug
+### excluded, but data is clean). Champion recipe otherwise:
+###   - non-thinking (strip CoT, /no_think, template qwen3_nothink)
+###   - plain LoRA, itemic layers FROZEN (IRON RULE)
+###   - drop-long (not smart-truncate; exp1 showed smart-truncate hurt 懂推荐)
+### Goal: does item-grounding augmentation lift 懂物料 (and 懂推荐 via better item
+### understanding) enough to beat champion 0.8596, without diluting 懂推荐?
+### Guardrail: check div_sa vs exp1's 17.40 after training (both non-thinking -> comparable).
+### ============================================================================
+
+### model
+model_name_or_path: /home/lab/wy/LLM_REC/OneReason-0.8B-pretrain-competition
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_target: all
+# NO additional_target -> embed_tokens / lm_head frozen
+
+### dataset
+dataset: onerec_sft_wuliao_aug   # official 32k + 懂物料_augmented only, non-thinking, drop-long (57,227)
+template: qwen3_nothink
+cutoff_len: 4096
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: saves/onereason-0.8b/lora/exp4
+logging_steps: 10
+save_steps: 500
+save_total_limit: 4
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 1.0e-4
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval
+val_size: 0.02
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 500
