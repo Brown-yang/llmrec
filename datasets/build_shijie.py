@@ -27,7 +27,9 @@ import random
 
 SYSTEM = "你是一个非常聪明的助手，请直接遵循指示作答。"
 INSTR_HEAD = "请回答以下问题："
-INSTR_TAIL = '请按以下格式作答："正确答案是 (在此处填写选项字母)"'
+# eval prompt ends with /no_think (non-thinking) directly after the closing quote, e.g.
+# ...(在此处填写选项字母)"/no_think<|im_end|>  -- must match so 懂世界 trains non-thinking too.
+INSTR_TAIL = '请按以下格式作答："正确答案是 (在此处填写选项字母)"/no_think'
 LETTERS = ["A", "B", "C", "D", "E", "F"]
 
 
@@ -120,6 +122,32 @@ def from_gsm8k_zh(path: str, bare: bool, limit: int | None):
             return
 
 
+def from_logiqa(path: str, bare: bool, limit: int | None):
+    """LogiQA zh (lgw863/LogiQA-dataset zh_*.txt): Chinese logical-reasoning MCQ.
+    Block format (blank-line separated): answer_letter / context / question / A. / B. / C. / D.
+    Combines context+question (reading-comprehension logic), yields the 懂世界 template."""
+    text = open(path, encoding="utf-8").read()
+    blocks = [b for b in text.split("\n\n") if b.strip()]
+    n = 0
+    for b in blocks:
+        lines = [x for x in b.split("\n") if x.strip() != ""]
+        if len(lines) < 7:
+            continue
+        ans = lines[0].strip().upper()
+        context, question = lines[1].strip(), lines[2].strip()
+        opts = []
+        for ln in lines[3:7]:
+            ln = ln.strip()
+            opts.append(ln[2:].strip() if len(ln) > 2 and ln[1] in ".、)" else ln)
+        if ans not in LETTERS or len(opts) < 4:
+            continue
+        q = f"{context}\n{question}" if context else question
+        yield make_record(q, opts, ans, bare)
+        n += 1
+        if limit and n >= limit:
+            return
+
+
 def from_jsonl(path: str, bare: bool, limit: int | None):
     """Generic: each line has {question, options:[..] OR A/B/C/D, answer}."""
     n = 0
@@ -141,7 +169,7 @@ def from_jsonl(path: str, bare: bool, limit: int | None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", choices=["cmmlu", "jsonl", "gsm8k_zh"], default="cmmlu")
+    ap.add_argument("--source", choices=["cmmlu", "jsonl", "gsm8k_zh", "logiqa"], default="cmmlu")
     ap.add_argument("--input", help="for --source jsonl/gsm8k_zh: path to the source file")
     ap.add_argument("--out", default="/home/lab/wy/LLM_REC/datasets/dataset_orin/懂世界.jsonl")
     ap.add_argument("--bare", action="store_true", help="response = bare letter (default: '正确答案是 X')")
@@ -153,6 +181,8 @@ def main():
         gen = from_cmmlu(args.bare, args.limit)
     elif args.source == "gsm8k_zh":
         gen = from_gsm8k_zh(args.input, args.bare, args.limit)
+    elif args.source == "logiqa":
+        gen = from_logiqa(args.input, args.bare, args.limit)
     else:
         gen = from_jsonl(args.input, args.bare, args.limit)
     records = list(gen)

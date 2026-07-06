@@ -21,7 +21,7 @@ NO_TRUNCATE = os.environ.get("NO_TRUNCATE") == "1"
 DROP_LONG = os.environ.get("DROP_LONG") == "1"
 OUT_TRAIN = os.environ.get("OUT_TRAIN", "/home/lab/wy/LLM_REC/LLaMA-Factory/data/onerec_sft.jsonl")
 MODEL_PATH = "/home/lab/wy/LLM_REC/OneReason-0.8B-pretrain-competition"
-MAX_TOKENS = 4096  # matches cutoff_len in the training config; drop the long tail
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "4096"))  # match cutoff_len; set 8192 to keep long 懂用户
 # instead of letting LLaMA-Factory truncate (it truncates from the front of the
 # prompt, which would cut off the trailing instruction in our long-context examples).
 

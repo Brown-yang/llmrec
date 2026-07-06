@@ -781,5 +781,14 @@
       "response": "output",
       "system": "system"
     }
+  },
+  "onerec_sft_exp5": {
+    "file_name": "onerec_sft_exp5.jsonl",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output",
+      "system": "system"
+    }
   }
 }

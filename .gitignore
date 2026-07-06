@@ -30,3 +30,6 @@ __pycache__/
 *.log
 .DS_Store
 .claude/
+datasets/GSM8K_zh/
+datasets/LogiQA-dataset/
+datasets/*.json
