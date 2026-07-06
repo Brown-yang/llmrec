@@ -22,6 +22,15 @@ Run (once TRL fixed, on A100):
 
 import argparse
 import json
+import os
+
+# --- shim: TRL 0.24 grpo_trainer eagerly imports optional deps (llm_blender) that expect
+# the old transformers TRANSFORMERS_CACHE symbol (removed in transformers 5.x). We don't use
+# them (custom reward), so just make the import chain succeed. Needs: pip install mergekit
+# llm-blender weave. ---
+import transformers.utils.hub as _hub
+if not hasattr(_hub, "TRANSFORMERS_CACHE"):
+    _hub.TRANSFORMERS_CACHE = os.path.expanduser("~/.cache/huggingface/hub")
 
 BASE = "/home/lab/wy/LLM_REC/OneReason-0.8B-pretrain-competition"
 
@@ -41,12 +50,16 @@ def main():
     ap.add_argument("--output", default="/home/lab/wy/LLM_REC/LLaMA-Factory/saves/onereason-0.8b/grpo/run1")
     ap.add_argument("--accuracy", choices=["graded", "exact", "recall"], default="graded",
                     help="reward accuracy component; graded is the viable one (probe: 31% signal)")
-    ap.add_argument("--num-generations", type=int, default=16, help="G rollouts per prompt (group size)")
+    ap.add_argument("--num-generations", type=int, default=8, help="G rollouts per prompt (group size)")
     ap.add_argument("--lr", type=float, default=1e-6, help="GRPO LR (low! itemic entropy is fragile)")
-    ap.add_argument("--max-completion-length", type=int, default=64)
+    ap.add_argument("--max-completion-length", type=int, default=48)
+    ap.add_argument("--max-prompt-length", type=int, default=1536, help="truncate prompts (24GB fit)")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--epochs", type=float, default=1.0)
     ap.add_argument("--lora-rank", type=int, default=8)
+    ap.add_argument("--beta", type=float, default=0.0, help="KL coef; 0 = no reference model (saves ~1.6GB)")
+    ap.add_argument("--grad-accum", type=int, default=4)
+    ap.add_argument("--max-steps", type=int, default=-1, help="cap steps (for smoke test); -1 = full")
     args = ap.parse_args()
 
     import torch
@@ -58,6 +71,9 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(BASE)
     model = AutoModelForCausalLM.from_pretrained(BASE, dtype=torch.bfloat16)
+    # shim: TRL 0.24 expects PreTrainedModel.warnings_issued (removed/absent in transformers 5.6)
+    if not hasattr(model, "warnings_issued"):
+        model.warnings_issued = {}
     if args.init_adapter:
         # warm-start from an SFT LoRA, then continue training it under GRPO
         model = PeftModel.from_pretrained(model, args.init_adapter, is_trainable=True)
@@ -77,19 +93,24 @@ def main():
 
     config = GRPOConfig(
         output_dir=args.output,
-        per_device_train_batch_size=args.num_generations,  # one prompt's group per step (adjust to VRAM)
+        per_device_train_batch_size=args.num_generations,  # one prompt's group per step
+        gradient_accumulation_steps=args.grad_accum,
         num_generations=args.num_generations,
         learning_rate=args.lr,
+        beta=args.beta,                               # 0 -> no reference model (saves VRAM on 24GB)
+        max_prompt_length=args.max_prompt_length,     # truncate long 懂推荐 prompts to fit
         max_completion_length=args.max_completion_length,
         temperature=args.temperature,
         num_train_epochs=args.epochs,
+        max_steps=args.max_steps,
         bf16=True,
-        logging_steps=10,
+        gradient_checkpointing=True,
+        logging_steps=2,
         save_steps=200,
         report_to="none",
         # NOTE: TRL exposes epsilon (clip) as a single value. The report's STAGE-WISE clipping
         # (loose on CoT tokens, TIGHT on itemic tokens to prevent entropy collapse) is NOT
-        # expressible via config alone.
+        # expressible via config alone -> TODO subclass (see below).
     )
 
     trainer = GRPOTrainer(
