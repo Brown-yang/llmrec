@@ -1,0 +1,60 @@
+### ============================================================================
+### exp6: WEIGHT-ALIGNED DATA + cutoff 8192. Fixes 3 data problems found by analyzing
+### the eval logs (see PROGRESS.md §9):
+###   1. cutoff 8192 (not 4096) -> recovers 懂用户 long samples: 1120 -> 2869 (99.2%).
+###      懂用户 is 25% weight but champion starved it (median 4487 tok > 4096 -> dropped).
+###   2. adds 懂世界 (5000: CMMLU 常识 + GSM8K_zh 中文数学 -> MCQ). Official data has ZERO
+###      懂世界; the 0.13 score was pure base model. Format matches eval (bare letter + /no_think).
+###   3. keeps champion's correct mode: non-thinking, plain LoRA, itemic FROZEN, drop-long
+###      (only 23 records > 8192 dropped -> effectively no data loss, unlike champion/exp1).
+### Composition: 懂推荐 19204(51%) 懂物料 10384(28%) 懂用户 2869(8%) 懂世界 5000(13%).
+### Goal: lift 懂用户 (25% wt) + 懂世界 (12.5% wt) without diluting 懂推荐 (kept >50%) -> beat 0.8596.
+### ============================================================================
+
+### model
+model_name_or_path: /home/lab/wy/LLM_REC/OneReason-0.8B-pretrain-competition
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_target: all
+# NO additional_target -> embed_tokens / lm_head FROZEN (iron rule)
+
+### dataset
+dataset: onerec_sft_exp6
+template: qwen3_nothink
+cutoff_len: 4096            # champion cutoff (exp5的8192恢复懂用户被证实无效,退回)
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: saves/onereason-0.8b/lora/exp6
+logging_steps: 10
+save_steps: 500
+save_total_limit: 3
+plot_loss: true
+overwrite_output_dir: true
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+gradient_checkpointing: true   # needed for 8192 to fit 24GB
+learning_rate: 1.0e-4
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+
+### eval
+val_size: 0.02
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 500
